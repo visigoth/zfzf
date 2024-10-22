@@ -4,6 +4,208 @@
 #
 # Copyright (C) 2021 Maddison Hellstrom <https://github.com/b0o>, MIT License.
 
+function _zfzf_run() {
+  local input_cmd_var=$1
+  local header=$2
+  local initial_query=$3
+  local user_input=$4
+
+  # --- Configuration Options --- #
+  local -i enable_color=${ZFZF_ENABLE_COLOR:-1}
+  local -i enable_preview=${ZFZF_ENABLE_PREVIEW:-1}
+  local -i enable_bat=${ZFZF_ENABLE_BAT:-2}
+  local bat_path="${ZFZF_BAT_PATH:-}"
+
+  local -i enable_exa=${ZFZF_ENABLE_EXA:-2}
+  local exa_path="${ZFZF_EXA_PATH:-}"
+  local realpath_cmd=${ZFZF_REALPATH_CMD:-realpath}
+
+  # --- Setup --- #
+  local color="never"
+  if [[ $enable_color -eq 1 ]]; then
+    color="always"
+  fi
+
+  local -A cmds=()
+
+  if [[ $enable_bat -ge 1 ]]; then
+    cmds[bat]="${bat_path:-${commands[bat]:-}}"
+    if [[ $enable_bat -eq 1 && -z "${cmds[bat]}" ]]; then
+      echo >&2
+      echo "Error: ZFZF_ENABLE_BAT is set but bat was not found in PATH" >&2
+      if [[ $zle -eq 1 ]]; then
+        zle reset-prompt
+      fi
+      return 1
+    fi
+    if [[ -z "${cmds[bat]:-}" ]]; then
+      unset "cmds[bat]"
+    fi
+  fi
+
+  if [[ $enable_exa -ge 1 ]]; then
+    cmds[exa]="${exa_path:-${commands[exa]:-}}"
+    if [[ $enable_exa -eq 1 && -z "${cmds[exa]}" ]]; then
+      echo >&2
+      echo "Error: ZFZF_ENABLE_EXA is set but exa was not found in PATH" >&2
+      if [[ $zle -eq 1 ]]; then
+        zle reset-prompt
+      fi
+      return 1
+    fi
+    if [[ -z "${cmds[exa]:-}" ]]; then
+      unset "cmds[exa]"
+    fi
+  fi
+
+
+  local -a fzf_cmd=(
+    /usr/bin/env fzf
+      --reverse
+      --ansi
+      --print-query
+      --cycle
+      --height='50%'
+      --header="'$header'"
+      --query="$initial_query"
+      --expect="'ctrl-d,alt-return,ctrl-g,alt-P,alt-o,alt-i,alt-u,alt-U,alt-.,alt->'"
+      --bind="'ctrl-o:replace-query'"
+  )
+
+  if [[ $enable_preview -eq 1 ]]; then
+    local preview_file
+    if [[ ${+cmds[bat]} -eq 1 ]]; then
+      preview_file="${cmds[bat]} --color='$color'"
+    else
+      preview_file="${commands[cat]}"
+    fi
+
+    local preview_dir
+    if [[ ${+cmds[exa]} -eq 1 ]]; then
+      preview_dir="${cmds[exa]} --tree --level=1 --color='$color'"
+    else
+      preview_dir="${commands[tree]} -L 1"
+    fi
+
+    local preview_other='stat'
+
+    local -a fzf_preview=(
+      'f="$('"$realpath_cmd"' -m "'"$path_orig_absolute"'/{}")";'
+      'if [[ -d "$f" ]]; then'
+        "$preview_dir"' "$f" 2>/dev/null;'
+      'elif [[ -f "$f" ]]; then'
+        "$preview_file"' "$f" 2>/dev/null;'
+      'else'
+        "$preview_other"' "$f" 2>/dev/null;'
+      'fi'
+    )
+
+    fzf_cmd+=(
+      --preview="\"bash -c '$fzf_preview'\""
+    )
+  fi
+
+  # --- FZF Run --- #
+  local cmd="${(P)input_cmd_var} | ${fzf_cmd[@]}"
+  local res
+  res=$(eval $cmd)
+
+  # --- FZF Result Handling --- #
+  local -i code=$?
+
+  local path_new
+  local query key match
+  local -i esc=0
+  case $code in
+  0|1|130)
+    query="$(head -1 <<<"$res")"
+    ;|
+
+  0|1)
+    key="$(head -2 <<<"$res" | tail -1)"
+
+    case "${key:-}" in
+    "alt-u"|"alt->")
+      path_new=".."
+      ;;
+    "ctrl-d"|"alt-o"|"alt-P")
+      path_new="${query:-}"
+      ;;
+    "alt-U"|"ctrl-g")
+      path_new="."
+      ;;
+    esac
+    ;|
+
+  # Match
+  0)
+    path_new="${path_new:-$(tail -1 <<<"$res")}"
+    ;;
+
+  # No match
+  1)
+    ;;
+
+  # Interrupted with CTRL-C or ESC
+  130)
+    esc=1
+    path_new=""
+    ;;
+
+  # Error
+  2|*)
+    return 1
+    ;;
+  esac
+
+  # --- Final Result Handling --- #
+  if [[ "$key" != "alt-o" && "$key" != "ctrl-d" && $esc -eq 0 ]]; then
+    path_new="${path_orig:+$path_orig/}${path_new}"
+    path_new="$("${realpath_cmd}" -m --relative-to="$relative" "${path_new:-.}")"
+
+    if [[ "$key" == "alt-U" ]]; then
+      local -i alt_u_once=0 # we want the following loop to run at least once
+      while [[ $alt_u_once -eq 0 || ! -e "$path_new" ]]; do
+        alt_u_once=1
+        path_new="$("${realpath_cmd}" -m --relative-to="$relative" "${path_new}/..")"
+      done
+    fi
+
+    if [[ "$relative" == "/" ]]; then
+      path_new="/${path_new}"
+    fi
+  fi
+
+  if [[ "$key" == "alt-return" || "$key" == "ctrl-g" ]]; then
+    path_new="$("${realpath_cmd}" -m "$path_new")"
+  fi
+
+  if [[ $esc -eq 1 && -z "$path_new" && -n "$userinput" ]]; then
+    path_new="$user_input"
+  fi
+
+  if [[ -d "${path_new}" ]]; then
+    path_new="${path_new}/"
+  fi
+
+  if [[ "$mode" == "zle" ]]; then
+    LBUFFER="${left}${path_new}"
+    RBUFFER="$right"
+    zle reset-prompt
+  fi
+
+  if [[ "$key" =~ ^alt-[uUoP\>]$ || ( "$key" =~ ^alt-[i.]$ && ( ! -e "$path_new" || -d "$path_new" ) ) ]]; then
+    zfzf "${opts[@]}" "$path_new"
+    return
+  fi
+  if [[ "$mode" == "completion" ]]; then
+    builtin compadd -UQqS '' -- "$path_new"
+  fi
+  if [[ "$mode" == "standalone" ]]; then
+    echo "$path_new"
+  fi
+}
+
 function zfzf () {
   local version="v0.2.0"
 
@@ -40,7 +242,7 @@ Configuration Options
     When enabled, the focused item will be displayed in the fzf preview window.
 
   ZFZF_ENABLE_DOT_DOTDOT        1
-    When enabled, display '.' and '..' at the top of the file listing.
+    When enabled, display '.' and '..' at the top of the file listing.<64;72;74M
 
   ZFZF_ZSH_BINDING              ^[. (Alt-.)
     Sets the keybinding sequence used to trigger zfzf. If set to the empty
@@ -126,59 +328,12 @@ EOF
     fi
   fi
 
-  # --- Configuration Options --- #
-  local -i enable_color=${ZFZF_ENABLE_COLOR:-1}
-  local -i enable_preview=${ZFZF_ENABLE_PREVIEW:-1}
   local -i dot_dotdot=${ZFZF_ENABLE_DOT_DOTDOT:-1}
-
-  local -i enable_bat=${ZFZF_ENABLE_BAT:-2}
-  local bat_path="${ZFZF_BAT_PATH:-}"
-
-  local -i enable_exa=${ZFZF_ENABLE_EXA:-2}
-  local exa_path="${ZFZF_EXA_PATH:-}"
   local realpath_cmd=${ZFZF_REALPATH_CMD:-realpath}
-
-  # --- Setup --- #
-  local color="never"
-  if [[ $enable_color -eq 1 ]]; then
-    color="always"
-  fi
-
-  local -A cmds=()
-
-  if [[ $enable_bat -ge 1 ]]; then
-    cmds[bat]="${bat_path:-${commands[bat]:-}}"
-    if [[ $enable_bat -eq 1 && -z "${cmds[bat]}" ]]; then
-      echo >&2
-      echo "Error: ZFZF_ENABLE_BAT is set but bat was not found in PATH" >&2
-      if [[ $zle -eq 1 ]]; then
-        zle reset-prompt
-      fi
-      return 1
-    fi
-    if [[ -z "${cmds[bat]:-}" ]]; then
-      unset "cmds[bat]"
-    fi
-  fi
-
-  if [[ $enable_exa -ge 1 ]]; then
-    cmds[exa]="${exa_path:-${commands[exa]:-}}"
-    if [[ $enable_exa -eq 1 && -z "${cmds[exa]}" ]]; then
-      echo >&2
-      echo "Error: ZFZF_ENABLE_EXA is set but exa was not found in PATH" >&2
-      if [[ $zle -eq 1 ]]; then
-        zle reset-prompt
-      fi
-      return 1
-    fi
-    if [[ -z "${cmds[exa]:-}" ]]; then
-      unset "cmds[exa]"
-    fi
-  fi
-
   local -a awk_opts=()
+
   if [[ "${ZFZF_ENABLE_DOT_DOTDOT:-1}" -eq 1 ]]; then
-    awk_opts+=(-v 'dot_dotdot=.\n..\n')
+    awk_opts+=(-v "dot_dotdot='.\n..\n'")
   fi
   if [[ $dirsonly -eq 1 ]]; then
     awk_opts+=(-v 'dirsonly=1')
@@ -235,160 +390,14 @@ EOF
     zle reset-prompt
   fi
 
-  local -a fzf_cmd=(
-    /usr/bin/env fzf
-      --reverse
-      --ansi
-      --print-query
-      --cycle
-      --height='50%'
-      --header="$path_orig_absolute"
-      --query="$fzf_query"
-      --expect='ctrl-d,alt-return,ctrl-g,alt-P,alt-o,alt-i,alt-u,alt-U,alt-.,alt->'
-      --bind='ctrl-o:replace-query'
-  )
+  local awk_filter=('BEGIN { printf "%s", dot_dotdot }'
+                    ' /\/$/ { dirs = dirs $0 "\n"; next } '
+                    ' ! dirsonly { print } '
+                    ' END { printf "%s", dirs }')
+  local input_cmd=("${commands[ls]}" -1Ap --color "$path_orig_absolute"
+                   "| ${commands[awk]}" "${awk_opts[@]}" "'$awk_filter'")
 
-  if [[ $enable_preview -eq 1 ]]; then
-    local preview_file
-    if [[ ${+cmds[bat]} -eq 1 ]]; then
-      preview_file="${cmds[bat]} --color='$color'"
-    else
-      preview_file="${commands[cat]}"
-    fi
-
-    local preview_dir
-    if [[ ${+cmds[exa]} -eq 1 ]]; then
-      preview_dir="${cmds[exa]} --tree --level=1 --color='$color'"
-    else
-      preview_dir="${commands[tree]} -L 1"
-    fi
-
-    local preview_other="stat '$f' 2>/dev/null"
-
-
-    local -a fzf_preview=(
-      'f="$('"$realpath_cmd"' -m "'"$path_orig_absolute"'/{}")";'
-      'if [[ -d "$f" ]]; then'
-        "$preview_dir"' "$f" 2>/dev/null;'
-      'elif [[ -f "$f" ]]; then'
-        "$preview_file"' "$f" 2>/dev/null;'
-      'else'
-        "$preview_other"' "$f" 2>/dev/null;'
-      'fi'
-    )
-
-echo $preview_file
-    fzf_cmd+=(
-      --preview="bash -c '$fzf_preview'"
-    )
-  fi
-
-  # --- FZF Run --- #
-  local res
-  res="$(
-      "${commands[ls]}" -1Ap --color "$path_orig_absolute" \
-      | "${commands[awk]}" "${awk_opts[@]}" '
-          BEGIN { printf "%s", dot_dotdot }
-          /\/$/ { dirs = dirs $0 "\n"; next }
-          ! dirsonly { print }
-          END { printf "%s", dirs }
-        ' \
-      | "${fzf_cmd[@]}")"
-
-  # --- FZF Result Handling --- #
-  local -i code=$?
-
-  local path_new
-  local query key match
-  local -i esc=0
-  case $code in
-  0|1|130)
-    query="$(head -1 <<<"$res")"
-    ;|
-
-  0|1)
-    key="$(head -2 <<<"$res" | tail -1)"
-
-    case "${key:-}" in
-    "alt-u"|"alt->")
-      path_new=".."
-      ;;
-    "ctrl-d"|"alt-o"|"alt-P")
-      path_new="${query:-}"
-      ;;
-    "alt-U"|"ctrl-g")
-      path_new="."
-      ;;
-    esac
-    ;|
-
-  # Match
-  0)
-    path_new="${path_new:-$(tail -1 <<<"$res")}"
-    ;;
-
-  # No match
-  1)
-    ;;
-
-  # Interrupted with CTRL-C or ESC
-  130)
-    esc=1
-    path_new=""
-    ;;
-
-  # Error
-  2|*)
-    return 1
-    ;;
-  esac
-
-  # --- Final Result Handling --- #
-  if [[ "$key" != "alt-o" && "$key" != "ctrl-d" && $esc -eq 0 ]]; then
-    path_new="${path_orig:+$path_orig/}${path_new}"
-    path_new="$("${realpath_cmd}" -m --relative-to="$relative" "${path_new:-.}")"
-
-    if [[ "$key" == "alt-U" ]]; then
-      local -i alt_u_once=0 # we want the following loop to run at least once
-      while [[ $alt_u_once -eq 0 || ! -e "$path_new" ]]; do
-        alt_u_once=1
-        path_new="$("${realpath_cmd}" -m --relative-to="$relative" "${path_new}/..")"
-      done
-    fi
-
-    if [[ "$relative" == "/" ]]; then
-      path_new="/${path_new}"
-    fi
-  fi
-
-  if [[ "$key" == "alt-return" || "$key" == "ctrl-g" ]]; then
-    path_new="$("${realpath_cmd}" -m "$path_new")"
-  fi
-
-  if [[ $esc -eq 1 && -z "$path_new" && -n "$input" ]]; then
-    path_new="$input"
-  fi
-
-  if [[ -d "${path_new}" ]]; then
-    path_new="${path_new}/"
-  fi
-
-  if [[ "$mode" == "zle" ]]; then
-    LBUFFER="${left}${path_new}"
-    RBUFFER="$right"
-    zle reset-prompt
-  fi
-
-  if [[ "$key" =~ ^alt-[uUoP\>]$ || ( "$key" =~ ^alt-[i.]$ && ( ! -e "$path_new" || -d "$path_new" ) ) ]]; then
-    zfzf "${opts[@]}" "$path_new"
-    return
-  fi
-  if [[ "$mode" == "completion" ]]; then
-    builtin compadd -UQqS '' -- "$path_new"
-  fi
-  if [[ "$mode" == "standalone" ]]; then
-    echo "$path_new"
-  fi
+  _zfzf_run input_cmd $path_orig_absolute $fzf_query ''
 }
 
 function disable-zfzf-tab() {
