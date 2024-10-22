@@ -136,6 +136,7 @@ EOF
 
   local -i enable_exa=${ZFZF_ENABLE_EXA:-2}
   local exa_path="${ZFZF_EXA_PATH:-}"
+  local realpath_cmd=${ZFZF_REALPATH_CMD:-realpath}
 
   # --- Setup --- #
   local color="never"
@@ -218,7 +219,7 @@ EOF
     path_orig_absolute="$path_orig"
     relative="/"
   else
-    path_orig_absolute="$(realpath -m "${path_orig:-.}")"
+    path_orig_absolute="$("${realpath_cmd}" -m "${path_orig:-.}")"
   fi
 
   # --- FZF Setup --- #
@@ -264,8 +265,9 @@ EOF
 
     local preview_other="stat '$f' 2>/dev/null"
 
+
     local -a fzf_preview=(
-      'f="$(realpath -m "'"$path_orig_absolute"'/{}")";'
+      'f="$('"$realpath_cmd"' -m "'"$path_orig_absolute"'/{}")";'
       'if [[ -d "$f" ]]; then'
         "$preview_dir"' "$f" 2>/dev/null;'
       'elif [[ -f "$f" ]]; then'
@@ -275,6 +277,7 @@ EOF
       'fi'
     )
 
+echo $preview_file
     fzf_cmd+=(
       --preview="bash -c '$fzf_preview'"
     )
@@ -343,13 +346,13 @@ EOF
   # --- Final Result Handling --- #
   if [[ "$key" != "alt-o" && "$key" != "ctrl-d" && $esc -eq 0 ]]; then
     path_new="${path_orig:+$path_orig/}${path_new}"
-    path_new="$(realpath -m --relative-to="$relative" "${path_new:-.}")"
+    path_new="$("${realpath_cmd}" -m --relative-to="$relative" "${path_new:-.}")"
 
     if [[ "$key" == "alt-U" ]]; then
       local -i alt_u_once=0 # we want the following loop to run at least once
       while [[ $alt_u_once -eq 0 || ! -e "$path_new" ]]; do
         alt_u_once=1
-        path_new="$(realpath -m --relative-to="$relative" "${path_new}/..")"
+        path_new="$("${realpath_cmd}" -m --relative-to="$relative" "${path_new}/..")"
       done
     fi
 
@@ -359,7 +362,7 @@ EOF
   fi
 
   if [[ "$key" == "alt-return" || "$key" == "ctrl-g" ]]; then
-    path_new="$(realpath -m "$path_new")"
+    path_new="$("${realpath_cmd}" -m "$path_new")"
   fi
 
   if [[ $esc -eq 1 && -z "$path_new" && -n "$input" ]]; then
